@@ -1,19 +1,62 @@
 <?php
+session_start();
 include '../includes/conexion.php';
 
 $error = '';
 $success = false;
+$cliente = $_SESSION['cliente'] ?? null;
+$booking = $_SESSION['booking'] ?? [];
+
+// Build booking data from POST or session fallback.
+function mapRoomTypeToHabitacionTipo(string $roomType): string
+{
+    $map = [
+        'BUSINESS' => 'BUSINESS',
+        'BUSINESSXL' => 'XL',
+        'DELUXE' => 'DELUXE',
+        'SUITE' => 'SUITE',
+    ];
+
+    $key = strtoupper(str_replace(' ', '', $roomType));
+    return $map[$key] ?? strtoupper($roomType);
+}
+
+$checkin = $_POST['checkin'] ?? $booking['checkin'] ?? '';
+$checkout = $_POST['checkout'] ?? $booking['checkout'] ?? '';
+$adults = $_POST['adults'] ?? $booking['adults'] ?? '';
+$children = $_POST['children'] ?? $booking['children'] ?? '';
+$room_type = $_POST['room_type'] ?? '';
+$bed_type = $_POST['bed_type'] ?? '';
+
+$totalPersonas = (int) $adults + (int) $children;
+
+$dni = trim($_POST['dni'] ?? $cliente['DNI'] ?? '');
+$nombre = trim($_POST['nombre'] ?? $cliente['NOMBRE'] ?? '');
+$apellido = trim($_POST['apellido'] ?? $cliente['APELLIDO'] ?? '');
+$mail = trim($_POST['mail'] ?? $cliente['MAIL'] ?? '');
+$telefono = trim($_POST['telefono'] ?? $cliente['TELEFONO'] ?? '');
+$card_number = trim($_POST['card_number'] ?? '');
+$card_cvc = trim($_POST['card_cvc'] ?? '');
+
+if ($room_type !== '' && $bed_type !== '') {
+    $tipoHabitacion = mapRoomTypeToHabitacionTipo($room_type);
+    $camaDB = strtoupper($bed_type);
+    $stmt = $conexion->prepare(
+        'SELECT COUNT(*) FROM habitacion h
+         WHERE UPPER(h.TIPO) = ?
+           AND UPPER(h.CAMA) = ?
+           AND h.PERSONAS = ?'
+    );
+    $stmt->execute([$tipoHabitacion, $camaDB, $totalPersonas]);
+    $roomMatchCount = (int) $stmt->fetchColumn();
+
+    if ($roomMatchCount === 0) {
+        $error = 'No existe ninguna habitación con esa combinación exacta de personas y tipo de cama. Vuelve a elegir otra opción.';
+    }
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $dni = trim($_POST['dni'] ?? '');
-    $nombre = trim($_POST['nombre'] ?? '');
-    $apellido = trim($_POST['apellido'] ?? '');
-    $mail = trim($_POST['mail'] ?? '');
-    $telefono = trim($_POST['telefono'] ?? '');
-    $card_last3 = trim($_POST['card_last3'] ?? '');
-
-    // Validate
-    if (empty($dni) || empty($nombre) || empty($apellido) || empty($mail) || empty($telefono) || empty($card_last3)) {
+    if (empty($dni) || empty($nombre) || empty($apellido) || empty($mail) || empty($telefono) || empty($card_number) || empty($card_cvc)) {
         $error = 'Todos los campos son obligatorios.';
     } elseif (!preg_match('/^[0-9]{8}[A-Z]$/', $dni)) {
         $error = 'DNI inválido.';
@@ -21,27 +64,72 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $error = 'Email inválido.';
     } elseif (!preg_match('/^[0-9]{9}$/', $telefono)) {
         $error = 'Teléfono inválido.';
-    } elseif (!preg_match('/^[0-9]{3}$/', $card_last3)) {
-        $error = 'Últimos 3 dígitos de la tarjeta deben ser 3 números.';
+    } elseif (!preg_match('/^[0-9]{16}$/', $card_number)) {
+        $error = 'Número de tarjeta inválido. Debe tener 16 dígitos.';
+    } elseif (!preg_match('/^[0-9]{3}$/', $card_cvc)) {
+        $error = 'CVC inválido. Debe tener 3 dígitos.';
     } else {
-        // Insert into cliente
-        try {
-            $stmt = $conexion->prepare("INSERT INTO cliente (DNI, NOMBRE, APELLIDO, MAIL, TELEFONO) VALUES (?, ?, ?, ?, ?)");
-            $stmt->execute([$dni, $nombre, $apellido, $mail, $telefono]);
+        if (!$cliente) {
+            try {
+                $stmt = $conexion->prepare("INSERT INTO cliente (DNI, NOMBRE, APELLIDO, MAIL, TELEFONO) VALUES (?, ?, ?, ?, ?)");
+                $stmt->execute([$dni, $nombre, $apellido, $mail, $telefono]);
+                $_SESSION['cliente'] = [
+                    'DNI' => $dni,
+                    'NOMBRE' => $nombre,
+                    'APELLIDO' => $apellido,
+                    'MAIL' => $mail,
+                    'TELEFONO' => $telefono,
+                ];
+                $cliente = $_SESSION['cliente'];
+            } catch (PDOException $e) {
+                $error = 'Error al guardar los datos: ' . $e->getMessage();
+            }
+        }
+
+        if ($error === '') {
+            $fecha1 = $checkin ? DateTime::createFromFormat('d/m/Y', $checkin) : null;
+            $fecha2 = $checkout ? DateTime::createFromFormat('d/m/Y', $checkout) : null;
+            $fecha_ent = $fecha1 ? $fecha1->format('Y-m-d') : null;
+            $fecha_sal = $fecha2 ? $fecha2->format('Y-m-d') : null;
+
+            if (!$fecha_ent || !$fecha_sal) {
+                $error = 'Fechas de reserva inválidas.';
+            } else {
+                try {
+                    $stmt = $conexion->prepare(
+                        'SELECT h.NUM_HAB FROM habitacion h
+                         WHERE UPPER(h.TIPO) = ?
+                           AND UPPER(h.CAMA) = ?
+                           AND h.PERSONAS = ?
+                           AND NOT EXISTS (
+                                SELECT 1 FROM reserva r
+                                WHERE r.HABITACION = h.NUM_HAB
+                                  AND NOT (r.FECHA_SAL <= ? OR r.FECHA_ENT >= ?)
+                            )
+                         ORDER BY h.NUM_HAB ASC
+                         LIMIT 1'
+                    );
+                    $stmt->execute([mapRoomTypeToHabitacionTipo($room_type), strtoupper($bed_type), $totalPersonas, $fecha_ent, $fecha_sal]);
+                    $habitacion = $stmt->fetchColumn();
+
+                    if (!$habitacion) {
+                        $error = 'No hay habitaciones disponibles para esa selección.';
+                    } else {
+                        $stmt = $conexion->prepare('INSERT INTO reserva (CLIENTE, HABITACION, FECHA_ENT, FECHA_SAL) VALUES (?, ?, ?, ?)');
+                        $stmt->execute([$cliente['DNI'], $habitacion, $fecha_ent, $fecha_sal]);
+                        unset($_SESSION['booking']);
+                    }
+                } catch (PDOException $e) {
+                    $error = 'Error al guardar la reserva: ' . $e->getMessage();
+                }
+            }
+        }
+
+        if ($error === '') {
             $success = true;
-        } catch (PDOException $e) {
-            $error = 'Error al guardar los datos: ' . $e->getMessage();
         }
     }
 }
-
-// Get booking data from POST
-$checkin = $_POST['checkin'] ?? '';
-$checkout = $_POST['checkout'] ?? '';
-$adults = $_POST['adults'] ?? '';
-$children = $_POST['children'] ?? '';
-$room_type = $_POST['room_type'] ?? '';
-$bed_type = $_POST['bed_type'] ?? '';
 ?>
 <!doctype html>
 <html class="no-js" lang="zxx">
@@ -99,6 +187,21 @@ $bed_type = $_POST['bed_type'] ?? '';
                                 <div class="alert alert-success">Pago procesado correctamente. ¡Reserva confirmada!</div>
                                 <a href="../index.php" class="btn btn-primary">Volver al inicio</a>
                             <?php else: ?>
+                                <?php if ($cliente): ?>
+                                    <div class="card mb-4">
+                                        <div class="card-body">
+                                            <h4 class="card-title">Resumen del Cliente</h4>
+                                            <p class="mb-3">Datos cargados desde tu cuenta.</p>
+                                            <ul>
+                                                <li><strong>DNI:</strong> <?php echo htmlspecialchars($cliente['DNI']); ?></li>
+                                                <li><strong>Nombre:</strong> <?php echo htmlspecialchars($cliente['NOMBRE']); ?></li>
+                                                <li><strong>Apellido:</strong> <?php echo htmlspecialchars($cliente['APELLIDO']); ?></li>
+                                                <li><strong>Email:</strong> <?php echo htmlspecialchars($cliente['MAIL']); ?></li>
+                                                <li><strong>Teléfono:</strong> <?php echo htmlspecialchars($cliente['TELEFONO']); ?></li>
+                                            </ul>
+                                        </div>
+                                    </div>
+                                <?php endif; ?>
                                 <div class="card mb-4">
                                     <div class="card-body">
                                         <h4 class="card-title">Resumen de Reserva</h4>
@@ -125,7 +228,7 @@ $bed_type = $_POST['bed_type'] ?? '';
                                                 <div class="boking-tittle">
                                                     <span>DNI:</span>
                                                 </div>
-                                                <input type="text" name="dni" class="form-control" required pattern="[0-9]{8}[A-Z]" placeholder="12345678A">
+                                                <input type="text" name="dni" class="form-control" required pattern="[0-9]{8}[A-Z]" value="<?php echo htmlspecialchars($dni); ?>" placeholder="12345678A">
                                             </div>
                                         </div>
                                         <div class="col-md-6 mb-30">
@@ -133,7 +236,7 @@ $bed_type = $_POST['bed_type'] ?? '';
                                                 <div class="boking-tittle">
                                                     <span>Nombre:</span>
                                                 </div>
-                                                <input type="text" name="nombre" class="form-control" required>
+                                                <input type="text" name="nombre" class="form-control" required value="<?php echo htmlspecialchars($nombre); ?>">
                                             </div>
                                         </div>
                                         <div class="col-md-6 mb-30">
@@ -141,7 +244,7 @@ $bed_type = $_POST['bed_type'] ?? '';
                                                 <div class="boking-tittle">
                                                     <span>Apellido:</span>
                                                 </div>
-                                                <input type="text" name="apellido" class="form-control" required>
+                                                <input type="text" name="apellido" class="form-control" required value="<?php echo htmlspecialchars($apellido); ?>">
                                             </div>
                                         </div>
                                         <div class="col-md-6 mb-30">
@@ -149,7 +252,7 @@ $bed_type = $_POST['bed_type'] ?? '';
                                                 <div class="boking-tittle">
                                                     <span>Email:</span>
                                                 </div>
-                                                <input type="email" name="mail" class="form-control" required>
+                                                <input type="email" name="mail" class="form-control" required value="<?php echo htmlspecialchars($mail); ?>">
                                             </div>
                                         </div>
                                         <div class="col-md-6 mb-30">
@@ -157,15 +260,15 @@ $bed_type = $_POST['bed_type'] ?? '';
                                                 <div class="boking-tittle">
                                                     <span>Teléfono:</span>
                                                 </div>
-                                                <input type="text" name="telefono" class="form-control" required pattern="[0-9]{9}" placeholder="600000000">
+                                                <input type="text" name="telefono" class="form-control" required pattern="[0-9]{9}" value="<?php echo htmlspecialchars($telefono); ?>" placeholder="600000000">
                                             </div>
                                         </div>
                                         <div class="col-md-6 mb-30">
                                             <div class="single-select-box">
                                                 <div class="boking-tittle">
-                                                    <span>Tarjeta Visa:</span>
+                                                    <span>Número de tarjeta:</span>
                                                 </div>
-                                                <input type="text" name="card_last3" class="form-control" required pattern="{[0-9]{4}}4" placeholder="1234 1234 1234 1234">
+                                                <input type="text" name="card_number" class="form-control" required pattern="[0-9]{16}" value="<?php echo htmlspecialchars($card_number); ?>" placeholder="1234123412341234">
                                             </div>
                                         </div>
                                         <div class="col-md-6 mb-30">
@@ -173,7 +276,7 @@ $bed_type = $_POST['bed_type'] ?? '';
                                                 <div class="boking-tittle">
                                                     <span>CVC:</span>
                                                 </div>
-                                                <input type="text" name="card_last3" class="form-control" required pattern="[0-9]{3}" placeholder="123">
+                                                <input type="text" name="card_cvc" class="form-control" required pattern="[0-9]{3}" value="<?php echo htmlspecialchars($card_cvc); ?>" placeholder="123">
                                             </div>
                                         </div>
                                     </div>

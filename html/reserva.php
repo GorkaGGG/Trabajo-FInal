@@ -60,7 +60,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'SELECT h.NUM_HAB FROM habitacion h
              WHERE UPPER(h.TIPO) = ?
                AND UPPER(h.CAMA) = ?
-               AND h.PERSONAS >= ?
+               AND h.PERSONAS = ?
                AND NOT EXISTS (
                     SELECT 1 FROM reserva r
                     WHERE r.HABITACION = h.NUM_HAB
@@ -174,7 +174,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                     </div>
                                 </div>
                             <?php elseif ($showForm): ?>
-                                <form action="reserva.php" method="post">
+                                <form action="pago.php" method="post">
                                     <input type="hidden" name="checkin" value="<?php echo htmlspecialchars($checkin); ?>">
                                     <input type="hidden" name="checkout" value="<?php echo htmlspecialchars($checkout); ?>">
                                     <input type="hidden" name="adults" value="<?php echo htmlspecialchars($adults); ?>">
